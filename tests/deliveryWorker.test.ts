@@ -27,13 +27,13 @@ describe('deliveryWorker.processOnce', () => {
 
   it('moves to DLQ after five failed delivery attempts', async () => {
     const store = new OutboxStore();
-    const baseNow = 2_000_000;
+    let now = 2_000_000;
     const msg = store.enqueue(
       {
         targetUrl: 'https://example.com/hook',
         body: '{"fail":true}',
       },
-      baseNow,
+      now,
     );
 
     const fetch: FetchLike = vi.fn(async () => ({
@@ -48,9 +48,13 @@ describe('deliveryWorker.processOnce', () => {
         workerId: 'worker-b',
         leaseMs: 30_000,
         fetch,
-        now: baseNow + i * 3_600_000,
+        now,
       });
       expect(result.outcome).toBe('retry');
+      if (result.outcome === 'retry') {
+        // Advance past backoff so the next claim is eligible.
+        now = result.nextAttemptAt;
+      }
     }
 
     const last = await processOnce({
@@ -58,7 +62,7 @@ describe('deliveryWorker.processOnce', () => {
       workerId: 'worker-b',
       leaseMs: 30_000,
       fetch,
-      now: baseNow + 4 * 3_600_000,
+      now,
     });
     expect(last.outcome).toBe('dead');
 
