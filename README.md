@@ -1,5 +1,7 @@
 # webhook-relay
 
+[![CI](https://github.com/marchikx/webhook-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/marchikx/webhook-relay/actions/workflows/ci.yml) ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
 Transactional webhook **outbox** for Node.js: enqueue events, deliver over HTTP with worker leases, exponential backoff, a dead-letter queue (DLQ), HMAC signing helpers, and idempotency keys. Everything ships with in-memory stores so you can unit-test reliability logic without a database.
 
 ## Who it is for
