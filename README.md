@@ -65,7 +65,7 @@ make verify
 
 ```mermaid
 flowchart TB
-  API[HTTP ingress] -->|202 accept| OB[(OutboxStore)]
+  API[HTTP ingress] -->|202 accept| OB[(OutboxRepository: memory or Postgres)]
   API --> IDEM[IdempotencyStore]
   W[Delivery worker] -->|claimWithLease| OB
   W -->|POST| DEST[Subscriber URL]
@@ -81,8 +81,11 @@ flowchart TB
 
 | Choice | Rationale |
 |--------|-----------|
-| In-memory default | Fast CI and pure unit tests; swap storage behind the same method shapes later. |
-| Lease on claim | Prevents two workers from delivering the same message concurrently. |
+| Two stores, one `OutboxRepository` contract | `OutboxStore` (memory) for unit tests; `PostgresOutboxStore` for production. The worker cannot tell them apart. |
+| Claim = one `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)` | Many workers poll one table without blocking or double-claiming; no advisory locks, no separate queue broker. |
+| Lease expiry instead of heartbeats | A crashed worker's message becomes claimable again after `leaseMs`. Cost: delivery is **at-least-once**, so receivers must dedupe (HMAC nonce / idempotency key). |
+| No lease fencing on `markDelivered` / `markFailed` | Kept simple on purpose. If a worker outlives its lease, a second delivery can race it; pick `leaseMs` well above your HTTP timeout. |
+| `pg` is a dev dependency only | `PostgresOutboxStore` takes any `{ query(text, params) }`, so `pg.Pool`, a pooled client, or a test double all work. |
 | 5-minute base backoff, 12h cap | Limits load on a failing endpoint while guaranteeing eventual DLQ visibility. |
 | `processOnce` not a long-running daemon | You control scheduling (cron, queue consumer, serverless tick). |
 | HMAC over `timestamp.nonce.body` | Common signed-webhook pattern; constant-time compare on verify. |
@@ -94,6 +97,18 @@ npm test
 ```
 
 Coverage includes HMAC verify success and failure, backoff growth and cap, successful delivery, five failures leading to DLQ, and duplicate idempotency rejection.
+
+**Against real Postgres** (`tests/postgresOutbox.integration.test.ts`, runs in CI on a `postgres:16` service; skipped locally unless `TEST_DATABASE_URL` is set):
+
+- 30 concurrent workers race for 20 messages → exactly 20 claims, zero duplicates
+- a worker that dies mid-lease → message is re-claimed only after the lease expires
+- duplicate `enqueue` id → one row, original payload kept
+- the real `processOnce` loop drives a poison message through retries into the DLQ
+
+```bash
+docker run -d --name relay-pg -e POSTGRES_PASSWORD=relay -p 5432:5432 postgres:16-alpine
+TEST_DATABASE_URL=postgresql://postgres:relay@localhost:5432/postgres npm test
+```
 
 ## License
 

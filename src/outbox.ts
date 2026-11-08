@@ -23,7 +23,16 @@ export type EnqueueInput = {
   id?: string;
 };
 
-export class OutboxStore {
+type Awaitable<T> = T | Promise<T>;
+
+/** What the delivery worker needs; implemented by `OutboxStore` (memory) and `PostgresOutboxStore`. */
+export interface OutboxRepository {
+  claimWithLease(workerId: string, leaseMs: number, now?: number): Awaitable<OutboxMessage | null>;
+  markDelivered(id: string): Awaitable<void>;
+  markFailed(id: string, error: string, nextAttemptAt: number, moveToDeadLetter: boolean): Awaitable<void>;
+}
+
+export class OutboxStore implements OutboxRepository {
   private readonly messages = new Map<string, OutboxMessage>();
   private readonly deadLetters = new Map<string, OutboxMessage>();
 

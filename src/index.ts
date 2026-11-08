@@ -15,7 +15,13 @@ export {
   type OutboxMessage,
   type OutboxStatus,
   type EnqueueInput,
+  type OutboxRepository,
 } from './outbox.js';
+export {
+  PostgresOutboxStore,
+  OUTBOX_SCHEMA_SQL,
+  type Queryable,
+} from './postgresOutbox.js';
 export {
   processOnce,
   type FetchLike,

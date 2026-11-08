@@ -1,5 +1,5 @@
 import { exponentialBackoffMs } from './backoff.js';
-import type { OutboxStore } from './outbox.js';
+import type { OutboxRepository } from './outbox.js';
 
 export type FetchLike = (
   input: string,
@@ -7,7 +7,7 @@ export type FetchLike = (
 ) => Promise<{ ok: boolean; status: number; statusText?: string }>;
 
 export type ProcessOnceOptions = {
-  store: OutboxStore;
+  store: OutboxRepository;
   workerId: string;
   leaseMs: number;
   fetch: FetchLike;
@@ -35,7 +35,7 @@ export async function processOnce(
     now = Date.now(),
   } = options;
 
-  const claimed = store.claimWithLease(workerId, leaseMs, now);
+  const claimed = await store.claimWithLease(workerId, leaseMs, now);
   if (!claimed) {
     return { outcome: 'idle' };
   }
@@ -51,7 +51,7 @@ export async function processOnce(
     });
 
     if (response.ok) {
-      store.markDelivered(claimed.id);
+      await store.markDelivered(claimed.id);
       return { outcome: 'delivered', messageId: claimed.id };
     }
 
@@ -63,18 +63,18 @@ export async function processOnce(
   }
 }
 
-function handleFailure(
-  store: OutboxStore,
+async function handleFailure(
+  store: OutboxRepository,
   messageId: string,
   previousAttempts: number,
   error: string,
   maxAttempts: number,
   now: number,
-): ProcessOnceResult {
+): Promise<ProcessOnceResult> {
   const attemptAfterFail = previousAttempts + 1;
   const moveToDeadLetter = attemptAfterFail >= maxAttempts;
   const nextAttemptAt = now + exponentialBackoffMs(attemptAfterFail);
-  store.markFailed(messageId, error, nextAttemptAt, moveToDeadLetter);
+  await store.markFailed(messageId, error, nextAttemptAt, moveToDeadLetter);
 
   if (moveToDeadLetter) {
     return { outcome: 'dead', messageId, attempt: attemptAfterFail };
