@@ -1,5 +1,6 @@
 import { exponentialBackoffMs } from './backoff.js';
-import type { OutboxRepository } from './outbox.js';
+import { signHmacSha256 } from './hmac.js';
+import type { LeaseFence, OutboxRepository } from './outbox.js';
 
 export type FetchLike = (
   input: string,
@@ -13,6 +14,8 @@ export type ProcessOnceOptions = {
   fetch: FetchLike;
   maxAttempts?: number;
   now?: number;
+  /** When set, outbound POSTs include X-Signature / X-Timestamp / X-Nonce HMAC headers. */
+  hmacSecret?: string;
 };
 
 export type ProcessOnceResult =
@@ -22,6 +25,21 @@ export type ProcessOnceResult =
   | { outcome: 'dead'; messageId: string; attempt: number };
 
 const DEFAULT_MAX_ATTEMPTS = 5;
+
+function signedHeaders(secret: string, body: string, now: number): Record<string, string> {
+  const timestamp = String(Math.floor(now / 1000));
+  const nonce =
+    typeof globalThis.crypto?.randomUUID === 'function'
+      ? globalThis.crypto.randomUUID()
+      : `n_${now}`;
+  const payload = `${timestamp}.${nonce}.${body}`;
+  const signature = signHmacSha256(secret, payload);
+  return {
+    'x-timestamp': timestamp,
+    'x-nonce': nonce,
+    'x-signature': signature,
+  };
+}
 
 export async function processOnce(
   options: ProcessOnceOptions,
@@ -33,6 +51,7 @@ export async function processOnce(
     fetch,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
     now = Date.now(),
+    hmacSecret,
   } = options;
 
   const claimed = await store.claimWithLease(workerId, leaseMs, now);
@@ -40,26 +59,33 @@ export async function processOnce(
     return { outcome: 'idle' };
   }
 
+  const fence: LeaseFence = {
+    workerId,
+    leaseUntil: claimed.leaseUntil ?? now + leaseMs,
+  };
+
   try {
+    const authHeaders = hmacSecret ? signedHeaders(hmacSecret, claimed.body, now) : {};
     const response = await fetch(claimed.targetUrl, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
         ...claimed.headers,
+        ...authHeaders,
       },
       body: claimed.body,
     });
 
     if (response.ok) {
-      await store.markDelivered(claimed.id);
+      await store.markDelivered(claimed.id, fence);
       return { outcome: 'delivered', messageId: claimed.id };
     }
 
     const error = `HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ''}`;
-    return handleFailure(store, claimed.id, claimed.attemptCount, error, maxAttempts, now);
+    return handleFailure(store, claimed.id, claimed.attemptCount, error, maxAttempts, now, fence);
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
-    return handleFailure(store, claimed.id, claimed.attemptCount, error, maxAttempts, now);
+    return handleFailure(store, claimed.id, claimed.attemptCount, error, maxAttempts, now, fence);
   }
 }
 
@@ -70,11 +96,12 @@ async function handleFailure(
   error: string,
   maxAttempts: number,
   now: number,
+  fence: LeaseFence,
 ): Promise<ProcessOnceResult> {
   const attemptAfterFail = previousAttempts + 1;
   const moveToDeadLetter = attemptAfterFail >= maxAttempts;
   const nextAttemptAt = now + exponentialBackoffMs(attemptAfterFail);
-  await store.markFailed(messageId, error, nextAttemptAt, moveToDeadLetter);
+  await store.markFailed(messageId, error, nextAttemptAt, moveToDeadLetter, fence);
 
   if (moveToDeadLetter) {
     return { outcome: 'dead', messageId, attempt: attemptAfterFail };

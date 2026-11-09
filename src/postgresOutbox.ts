@@ -1,5 +1,11 @@
-import { randomUUID } from 'node:crypto';
-import type { EnqueueInput, OutboxMessage, OutboxStatus } from './outbox.js';
+import type { EnqueueInput, LeaseFence, OutboxMessage, OutboxStatus } from './outbox.js';
+
+function createId(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `msg_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
 
 /** Minimal surface of `pg.Pool` / `pg.Client`, so this module has no runtime dependency on `pg`. */
 export type Queryable = {
@@ -71,7 +77,7 @@ export class PostgresOutboxStore {
 
   /** Idempotent on `id`: re-enqueueing an existing id returns the stored row unchanged. */
   async enqueue(input: EnqueueInput, now: number = Date.now()): Promise<OutboxMessage> {
-    const id = input.id ?? randomUUID();
+    const id = input.id ?? createId();
     const { rows } = await this.db.query<Row>(
       `INSERT INTO outbox_messages (id, target_url, body, headers, status, created_at, next_attempt_at)
        VALUES ($1, $2, $3, $4::jsonb, 'pending', $5, $5)
@@ -113,7 +119,16 @@ export class PostgresOutboxStore {
     return rows[0] ? toMessage(rows[0]) : undefined;
   }
 
-  async markDelivered(id: string): Promise<void> {
+  async markDelivered(id: string, fence?: LeaseFence): Promise<void> {
+    if (fence) {
+      await this.db.query(
+        `UPDATE outbox_messages
+            SET status = 'delivered', leased_by = NULL, lease_until = NULL, last_error = NULL
+          WHERE id = $1 AND leased_by = $2 AND lease_until = $3`,
+        [id, fence.workerId, fence.leaseUntil],
+      );
+      return;
+    }
     await this.db.query(
       `UPDATE outbox_messages
           SET status = 'delivered', leased_by = NULL, lease_until = NULL, last_error = NULL
@@ -127,7 +142,22 @@ export class PostgresOutboxStore {
     error: string,
     nextAttemptAt: number,
     moveToDeadLetter: boolean,
+    fence?: LeaseFence,
   ): Promise<void> {
+    if (fence) {
+      await this.db.query(
+        `UPDATE outbox_messages
+            SET attempt_count = attempt_count + 1,
+                last_error = $2,
+                leased_by = NULL,
+                lease_until = NULL,
+                next_attempt_at = $3,
+                status = CASE WHEN $4::boolean THEN 'dead' ELSE 'pending' END
+          WHERE id = $1 AND leased_by = $5 AND lease_until = $6`,
+        [id, error, nextAttemptAt, moveToDeadLetter, fence.workerId, fence.leaseUntil],
+      );
+      return;
+    }
     await this.db.query(
       `UPDATE outbox_messages
           SET attempt_count = attempt_count + 1,

@@ -1,5 +1,3 @@
-import { randomUUID } from 'node:crypto';
-
 export type OutboxStatus = 'pending' | 'leased' | 'delivered' | 'dead';
 
 export type OutboxMessage = {
@@ -23,13 +21,31 @@ export type EnqueueInput = {
   id?: string;
 };
 
+export type LeaseFence = {
+  workerId: string;
+  leaseUntil: number;
+};
+
 type Awaitable<T> = T | Promise<T>;
 
 /** What the delivery worker needs; implemented by `OutboxStore` (memory) and `PostgresOutboxStore`. */
 export interface OutboxRepository {
   claimWithLease(workerId: string, leaseMs: number, now?: number): Awaitable<OutboxMessage | null>;
-  markDelivered(id: string): Awaitable<void>;
-  markFailed(id: string, error: string, nextAttemptAt: number, moveToDeadLetter: boolean): Awaitable<void>;
+  markDelivered(id: string, fence?: LeaseFence): Awaitable<void>;
+  markFailed(
+    id: string,
+    error: string,
+    nextAttemptAt: number,
+    moveToDeadLetter: boolean,
+    fence?: LeaseFence,
+  ): Awaitable<void>;
+}
+
+function createId(): string {
+  if (typeof globalThis.crypto?.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `msg_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
 export class OutboxStore implements OutboxRepository {
@@ -37,7 +53,7 @@ export class OutboxStore implements OutboxRepository {
   private readonly deadLetters = new Map<string, OutboxMessage>();
 
   enqueue(input: EnqueueInput, now: number = Date.now()): OutboxMessage {
-    const id = input.id ?? randomUUID();
+    const id = input.id ?? createId();
     const message: OutboxMessage = {
       id,
       targetUrl: input.targetUrl,
@@ -80,9 +96,19 @@ export class OutboxStore implements OutboxRepository {
     return m ? { ...m } : undefined;
   }
 
-  markDelivered(id: string): void {
+  private assertFence(message: OutboxMessage, fence?: LeaseFence): boolean {
+    if (!fence) {
+      return true;
+    }
+    return message.leasedBy === fence.workerId && message.leaseUntil === fence.leaseUntil;
+  }
+
+  markDelivered(id: string, fence?: LeaseFence): void {
     const message = this.messages.get(id);
     if (!message) {
+      return;
+    }
+    if (!this.assertFence(message, fence)) {
       return;
     }
     message.status = 'delivered';
@@ -96,9 +122,13 @@ export class OutboxStore implements OutboxRepository {
     error: string,
     nextAttemptAt: number,
     moveToDeadLetter: boolean,
+    fence?: LeaseFence,
   ): void {
     const message = this.messages.get(id);
     if (!message) {
+      return;
+    }
+    if (!this.assertFence(message, fence)) {
       return;
     }
     message.attemptCount += 1;
