@@ -84,7 +84,8 @@ flowchart TB
 | Two stores, one `OutboxRepository` contract | `OutboxStore` (memory) for unit tests; `PostgresOutboxStore` for production. The worker cannot tell them apart. |
 | Claim = one `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)` | Many workers poll one table without blocking or double-claiming; no advisory locks, no separate queue broker. |
 | Lease expiry instead of heartbeats | A crashed worker's message becomes claimable again after `leaseMs`. Cost: delivery is **at-least-once**, so receivers must dedupe (HMAC nonce / idempotency key). |
-| No lease fencing on `markDelivered` / `markFailed` | Kept simple on purpose. If a worker outlives its lease, a second delivery can race it; pick `leaseMs` well above your HTTP timeout. |
+| Lease fencing on `markDelivered` / `markFailed` | Stale workers that lost the lease cannot flip status; `processOnce` passes `{ workerId, leaseUntil }` and tests cover reclaim races. |
+| Optional `hmacSecret` on `processOnce` | Outbound POSTs carry `X-Signature` / `X-Timestamp` / `X-Nonce` when set — see `examples/express-relay.ts`. |
 | `pg` is a dev dependency only | `PostgresOutboxStore` takes any `{ query(text, params) }`, so `pg.Pool`, a pooled client, or a test double all work. |
 | 5-minute base backoff, 12h cap | Limits load on a failing endpoint while guaranteeing eventual DLQ visibility. |
 | `processOnce` not a long-running daemon | You control scheduling (cron, queue consumer, serverless tick). |
